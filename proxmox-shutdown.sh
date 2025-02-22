@@ -11,13 +11,22 @@
 # ==============================
 # Configuration
 # ==============================
+
+# Test mode settings.
 DRY_RUN=false  # If set to true, the script will not shut down the host machine.
 SIMULATE_FAILURE=false  # If set to true, the script will simulate a power failure and ignore UPS status.
+
+# Script settings.
 POWER_FAILURE_WAIT_TIME=300  # Delay time in second for power restoration before taking action.
-VM_ACTION_DELAY=5  # Delay time in seconds between processing each VM action.
-VM_SHUTDOWN_TIMEOUT=30  # Timeout period in seconds before force shutdown of VMs that did not shut down gracefully.
-DEFAULT_ACTION="shutdown"  # Set to "shutdown" or "hibernate" to define the default action for all VMs. (Does not apply to CTs.)
-UPS_IDENTIFIER="myups@localhost" # NUT UPS identifier to query for status using upsc.
+ACTION_DELAY=1  # Delay time in seconds between processing each VM action.
+SHUTDOWN_TIMEOUT=10  # Timeout period in seconds before force shutdown of VMs that did not shut down gracefully.
+SYNC_AFTER_ACTION=true  # If set to true, the script will sync the filesystem after each VM action.
+
+# The UPS identifier to query for status using upsc. This must match the identifier in upsd.conf.
+UPS_IDENTIFIER="myups@localhost" # NUT UPS identifier.
+
+# Default action for all VMs. Set to "shutdown" or "hibernate". (Does not apply to CTs.)
+DEFAULT_ACTION="shutdown"  # Set to "shutdown" or "hibernate". 
 
 # Specific VM overrides. Add VMID and action to the array to override the default action.
 declare -A VM_ACTIONS
@@ -68,8 +77,15 @@ RUNNING_CTS=$(pct list | awk 'NR>1 && $2 == "running" {print $1}' | xargs -r)
 # Cycle through each running CT.
 for CTID in $RUNNING_CTS; do
 	log_message "Executing shutdown for CT $CTID."
+
+	# Execute the action. CTs do not support hibernation.
 	pct shutdown $CTID
-	sleep $VM_ACTION_DELAY
+
+	# Sync and sleep after each action to prevent I/O issues.
+	if [[ "$SYNC_AFTER_ACTION" == true ]]; then
+		sync
+	fi
+	sleep $ACTION_DELAY
 done
 
 # Get a list of all running VMs.
@@ -84,14 +100,18 @@ for VMID in $RUNNING_VMS; do
 	# Log and execute the action.
 	log_message "Executing $ACTION for VM $VMID."
 
+	# Execute the action.
 	if [[ "$ACTION" == "hibernate" ]]; then
 		qm suspend $VMID --todisk 1
 	else
 		qm shutdown $VMID --skiplock 1
 	fi
 
-	# Wait for the specified delay time before processing the next VM.
-	sleep $VM_ACTION_DELAY
+	# Sync and sleep after each action to prevent I/O issues.
+	if [[ "$SYNC_AFTER_ACTION" == true ]]; then
+		sync
+	fi
+	sleep $ACTION_DELAY
 done
 
 # ==============================
@@ -99,16 +119,23 @@ done
 # ==============================
 
 # Wait for VMs to shut down gracefully, then force stop any remaining VMs.
-log_message "Waiting for VMs to shut down. Checking again in $VM_SHUTDOWN_TIMEOUT seconds."
-sleep $VM_SHUTDOWN_TIMEOUT
+log_message "Waiting for VMs to shut down. Checking again in $SHUTDOWN_TIMEOUT seconds."
+sleep $SHUTDOWN_TIMEOUT
 
 # Force shutdown remaining CTs.
 RUNNING_CTS=$(pct list | awk 'NR>1 && $2 == "running" {print $1}' | xargs -r)
 for CTID in $RUNNING_CTS; do
 	if [[ $(pct status "$CTID") =~ running ]]; then
 		log_message "CT $CTID did not shut down cleanly. Forcing stop."
+
+		# Force stop the CT.
 		pct stop $CTID --skiplock 1
-		sleep $VM_ACTION_DELAY
+
+		# Sync and sleep after each action to prevent I/O issues.
+		if [[ "$SYNC_AFTER_ACTION" == true ]]; then
+			sync
+		fi
+		sleep $ACTION_DELAY
 	fi
 done
 
@@ -117,8 +144,15 @@ RUNNING_VMS=$(qm list | awk '$3 == "running" {print $1}' | xargs -r)
 for VMID in $RUNNING_VMS; do
 	if [[ $(qm status "$VMID") =~ running ]]; then
 		log_message "VM $VMID did not shut down cleanly. Forcing stop."
+
+		# Force stop the VM.
 		qm stop $VMID --skiplock 1
-		sleep $VM_ACTION_DELAY
+
+		# Sync and sleep after each action to prevent I/O issues.
+		if [[ "$SYNC_AFTER_ACTION" == true ]]; then
+			sync
+		fi
+		sleep $ACTION_DELAY
 	fi
 done
 
@@ -127,7 +161,7 @@ done
 # ==============================
 
 log_message "All VMs have been shut down. Proceeding with host shutdown."
-sleep 5
+sync
 
 if [[ "$DRY_RUN" == true ]]; then
 	log_message "Dry run enabled. Shutdown skipped."
